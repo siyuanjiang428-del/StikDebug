@@ -685,6 +685,7 @@ struct LocationBookmark: Identifiable, Codable {
     var name: String
     var latitude: Double
     var longitude: Double
+    var isMapSelection: Bool? = nil
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
@@ -733,6 +734,8 @@ struct LocationSimulationView: View {
     }
     @ObservedObject private var simulationSession = LocationSimulationSession.shared
     @State private var coordinate: CLLocationCoordinate2D?
+    @State private var selectionIsFromMap = false
+    @AppStorage("locationCorrectGCJ02MapPins") private var correctGCJ02MapPins = false
     @State private var position: MapCameraPosition = .userLocation(fallback: .automatic)
 
     @State private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
@@ -919,7 +922,7 @@ struct LocationSimulationView: View {
                 .mapStyle(.standard(elevation: .realistic))
                 .onTapGesture { point in
                     if let loc = proxy.convert(point, from: .local) {
-                        applySelection(loc)
+                        applySelection(loc, isMapSelection: true)
                     }
                 }
                 .mapControls {
@@ -1048,7 +1051,7 @@ struct LocationSimulationView: View {
         }
         .sheet(isPresented: $showBookmarks) {
             BookmarksView(bookmarks: $bookmarks) { bookmark in
-                applySelection(bookmark.coordinate)
+                applySelection(bookmark.coordinate, isMapSelection: bookmark.isMapSelection ?? false)
                 showBookmarks = false
             } onDelete: { offsets in
                 bookmarks.remove(atOffsets: offsets)
@@ -1076,6 +1079,7 @@ struct LocationSimulationView: View {
             loadBookmarks()
             if let routeCoordinates = simulationSession.routeCoordinates {
                 coordinate = nil
+                selectionIsFromMap = false
                 routePolyline = makeRoutePolyline(for: routeCoordinates)
                 routeStartSelection = routeCoordinates.first.map {
                     RouteSearchSelection(title: "Route Start", coordinate: $0)
@@ -1088,6 +1092,7 @@ struct LocationSimulationView: View {
                 }
             } else if let activeCoordinate = simulationSession.coordinate {
                 coordinate = activeCoordinate
+                selectionIsFromMap = simulationSession.isMapSelection
                 simulatedCoordinate = activeCoordinate
             }
         }
@@ -1121,7 +1126,8 @@ struct LocationSimulationView: View {
         let bookmark = LocationBookmark(
             name: name.isEmpty ? String(format: "%.4f, %.4f", coord.latitude, coord.longitude) : name,
             latitude: coord.latitude,
-            longitude: coord.longitude
+            longitude: coord.longitude,
+            isMapSelection: selectionIsFromMap
         )
         bookmarks.append(bookmark)
         saveBookmarks()
@@ -1224,6 +1230,7 @@ struct LocationSimulationView: View {
         isLoadingRoute = false
         isPrefetchingRouteSpeeds = false
         coordinate = nil
+        selectionIsFromMap = false
 
         let displayCoordinates = sampledRouteCoordinates(
             from: coordinates,
@@ -1276,6 +1283,17 @@ struct LocationSimulationView: View {
     @ViewBuilder
     private var pinControls: some View {
         if let coord = coordinate {
+            if selectionIsFromMap && GCJ02CoordinateConverter.isInApproximateCoverage(coord) {
+                Toggle("GCJ-02 → WGS-84", isOn: $correctGCJ02MapPins)
+                    .font(.footnote.monospaced())
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .frame(maxWidth: 210)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.regularMaterial, in: Capsule())
+            }
+
             Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
                 .font(.footnote.monospaced())
                 .foregroundStyle(.secondary)
@@ -1349,17 +1367,22 @@ struct LocationSimulationView: View {
 
     private func simulate() {
         guard pairingExists, let coord = coordinate, !isBusy else { return }
+        let isMapSelection = selectionIsFromMap
+        let target = isMapSelection && correctGCJ02MapPins
+            ? GCJ02CoordinateConverter.wgs84(from: coord)
+            : coord
+
         runLocationCommand(
             errorTitle: "Simulation Failed",
             errorMessage: { code in
                 "Could not simulate location (error \(code)). Make sure the device is connected and the DDI is mounted."
             },
-            operation: { locationUpdateCode(for: coord) }
+            operation: { locationUpdateCode(for: target) }
         ) {
             routePlaybackCoordinate = nil
             beginBackgroundTask()
             LocationSimulationSession.shared.clearRoute()
-            startResendLoop(with: coord)
+            startResendLoop(with: coord, sending: target, isMapSelection: isMapSelection)
         }
     }
 
@@ -1446,11 +1469,16 @@ struct LocationSimulationView: View {
         backgroundTaskID = .invalid
     }
 
-    private func startResendLoop(with coordinate: CLLocationCoordinate2D) {
+    private func startResendLoop(
+        with coordinate: CLLocationCoordinate2D,
+        sending coordinateToSend: CLLocationCoordinate2D? = nil,
+        isMapSelection: Bool = false
+    ) {
+        let target = coordinateToSend ?? coordinate
         simulatedCoordinate = coordinate
-        LocationSimulationSession.shared.startResending(at: coordinate) {
+        LocationSimulationSession.shared.startResending(at: coordinate, isMapSelection: isMapSelection) {
             LocationSimulationCommandQueue.shared.async {
-                _ = locationUpdateCode(for: coordinate)
+                _ = locationUpdateCode(for: target)
             }
         }
     }
@@ -1468,12 +1496,13 @@ struct LocationSimulationView: View {
         }
     }
 
-    private func applySelection(_ coordinate: CLLocationCoordinate2D) {
+    private func applySelection(_ coordinate: CLLocationCoordinate2D, isMapSelection: Bool = false) {
         guard !isRouteRunning else { return }
         if hasRouteContext {
             resetRouteSelection()
         }
         self.coordinate = coordinate
+        selectionIsFromMap = isMapSelection
     }
 
     private func resetRouteSelection() {

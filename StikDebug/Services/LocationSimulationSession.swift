@@ -8,12 +8,14 @@ final class LocationSimulationSession: ObservableObject {
     @Published private(set) var isActive = false
     @Published private(set) var coordinate: CLLocationCoordinate2D?
     @Published private(set) var routeCoordinates: [CLLocationCoordinate2D]?
+    private(set) var isMapSelection = false
     private var resendTimer: Timer?
     private var routeID: UUID?
 
     private init() {}
 
-    func start(at coordinate: CLLocationCoordinate2D) {
+    func start(at coordinate: CLLocationCoordinate2D, isMapSelection: Bool = false) {
+        self.isMapSelection = isMapSelection
         self.coordinate = coordinate
         if !isActive {
             isActive = true
@@ -22,8 +24,12 @@ final class LocationSimulationSession: ObservableObject {
         }
     }
 
-    func startResending(at coordinate: CLLocationCoordinate2D, _ operation: @escaping () -> Void) {
-        start(at: coordinate)
+    func startResending(
+        at coordinate: CLLocationCoordinate2D,
+        isMapSelection: Bool = false,
+        _ operation: @escaping () -> Void
+    ) {
+        start(at: coordinate, isMapSelection: isMapSelection)
         resendTimer?.invalidate()
         let timer = Timer(timeInterval: 4, repeats: true) { _ in operation() }
         RunLoop.main.add(timer, forMode: .common)
@@ -61,6 +67,7 @@ final class LocationSimulationSession: ObservableObject {
         clearRoute()
         guard isActive else { return }
         isActive = false
+        isMapSelection = false
         coordinate = nil
         BackgroundAudioManager.shared.requestStop()
         BackgroundLocationManager.shared.requestStop()
